@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 Also, at the bottom of this file there is a [TODO list](#todo) with planned future changes.
 
+## [Unreleased]
+
+### Added: Misc
+
+- Added `audit` subcommand: a read-only, deterministic inventory of `WRR`/`WRRB` inputs.
+
+  It enumerates the given files and directories in stable lexicographic order, stream-parses each file counting readable records, payload bytes, and detecting the format and compression shell, groups duplicates by a semantic fingerprint that is independent of the compression shell, bundling, and path, and sends truncated, corrupt, and unreadable files into a quarantine report instead of aborting the batch.
+  It writes `manifest.jsonl`, `quarantine.jsonl`, `duplicates.jsonl`, and `summary.json` reports plus an append-only `audit.journal` checkpoint journal into `--state-dir DIR`, so an interrupted run can be resumed without re-auditing unchanged files, and re-running it on unchanged inputs produces byte-identical reports.
+
 ## [tool-v0.26.0] - 2026-11-06: Incremental improvements, bug fixes
 
 ### Changed/Removed: Incompatible changes

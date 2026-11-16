@@ -565,6 +565,39 @@ def cmd_find(cargs: _t.Any) -> None:
     filters_warn()
 
 
+def cmd_audit(cargs: _t.Any) -> None:
+    from .audit import run_audit
+
+    handle_paths(cargs)
+    # `--stdin0` produces `bytes` paths; the audit reports are JSON text, so
+    # normalize everything to `str` here
+    cargs.paths = [fsdecode(p) for p in cargs.paths]
+    if cargs.state_dir is None:
+        raise Failure("`--state-dir DIR` is required")
+    state_dir = _op.abspath(_op.expanduser(cargs.state_dir))
+
+    def check_signals() -> None:
+        raise_first_delayed_signal()
+
+    _results, reports = run_audit(
+        cargs.paths,
+        state_dir,
+        follow_symlinks=cargs.follow_symlinks,
+        restart=cargs.restart,
+        fsync=cargs.fsync,
+        should_continue=check_signals,
+    )
+
+    terminator = cargs.terminator
+    if not cargs.quiet:
+        for name in sorted(reports.keys()):
+            stdout.write_str(name)
+            stdout.write_str(": ")
+            stdout.write_str(reports[name])
+            stdout.write_bytes(terminator)
+        stdout.flush()
+
+
 example_url = [
     "https://example.org",
     "https://example.org/",
@@ -4154,6 +4187,79 @@ The end.
     add_terminator(cmd, "print paths of matching `WRR` files")
     cmd.set_defaults(sniff=SniffContentType.NONE)
     cmd.set_defaults(func=cmd_find)
+
+    # audit
+    cmd = subparsers.add_parser("audit",
+        help=_("read-only audit inventory of `WRR`/`WRRB` archives with quarantine, duplicate, and checkpoint reports"),
+        description=_(f"""Produce a read-only, deterministic inventory of given `WRR`/`WRRB` inputs.
+
+Algorithm:
+
+- Enumerate all given `PATH`s (files and directories traversed recursively) in
+  stable lexicographic order;
+- For each file:
+  - stream-parse it without modifying anything, counting readable records,
+    payload bytes, and detecting the format and compression shell;
+  - compute a semantic fingerprint of the contents that is independent of the
+    compression shell (`gzip` vs plain), bundling (`.wrr` vs `.wrrb`), and
+    path;
+  - classify failures: truncated and otherwise corrupt files, and files that
+    can't be read at all, go into the quarantine report instead of aborting
+    the batch;
+- Write, into `--state-dir DIR`:
+  - `manifest.jsonl`: totals followed by one row per file, sorted by path and
+    record count;
+  - `quarantine.jsonl`: rows for truncated, corrupt, and unreadable files;
+  - `duplicates.jsonl`: groups of files sharing a semantic fingerprint;
+  - `summary.json`: aggregate counters;
+  - `audit.journal`: append-only checkpoint journal; an interrupted run can be
+    resumed, files unchanged since the previous run (same device, inode, size,
+    and `mtime`) are not re-audited; use `--restart` to ignore the journal.
+
+Re-running the audit on unchanged inputs produces byte-identical reports.
+Input files are only ever opened for reading; this subcommand never moves,
+deletes, or modifies them.
+"""),
+    )
+    add_pure(cmd)
+    add_terminator(cmd, "separate the printed report paths")
+
+    agrp = cmd.add_argument_group("audit state and reports")
+    agrp.add_argument("--state-dir", metavar="DIR", type=str,
+        help=_("directory in which to write the checkpoint journal and reports; created if missing; required"),
+    )
+    cmd.set_defaults(state_dir=None)
+    agrp.add_argument("--restart", action="store_true",
+        help=_("discard the previous checkpoint journal and audit every file from scratch instead of resuming"),
+    )
+
+    grp = agrp.add_mutually_exclusive_group()
+    grp.add_argument("--fsync", dest="fsync", action="store_true",
+        help=_("`fsync` the journal and report writes; safer against crashes, slower; default"),
+    )
+    grp.add_argument("--no-fsync", dest="fsync", action="store_false",
+        help=_("skip `fsync` calls when writing the journal and reports"),
+    )
+    cmd.set_defaults(fsync=True)
+
+    grp = agrp.add_mutually_exclusive_group()
+    grp.add_argument("--follow-symlinks", dest="follow_symlinks", action="store_true",
+        help=_("follow symbolic links while enumerating inputs"),
+    )
+    grp.add_argument("--no-follow-symlinks", dest="follow_symlinks", action="store_false",
+        help=_("do not follow symbolic links while enumerating inputs; default"),
+    )
+    cmd.set_defaults(follow_symlinks=False)
+
+    agrp = cmd.add_argument_group("input loading")
+    agrp.add_argument("--stdin0", action="store_true",
+        help=_("read zero-terminated `PATH`s from stdin, these will be processed after all `PATH`s specified as command-line arguments"),
+    )
+    agrp.add_argument("paths", metavar="PATH", nargs="*", type=str,
+        help=_("inputs, can be a mix of files and directories (which will be traversed recursively in stable lexicographic order)"),
+    )
+    cmd.set_defaults(walk_paths=WalkOrder.NONE)
+    cmd.set_defaults(func=cmd_audit)
 
     def add_organize(cmd: _t.Any, kind: str, cache: int = 8192, batch: int = 128) -> None:
         agrp = cmd.add_argument_group("caching")
